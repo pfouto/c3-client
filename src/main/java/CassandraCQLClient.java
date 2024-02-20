@@ -9,7 +9,7 @@ import com.datastax.driver.core.Session;
 import com.datastax.driver.core.PreparedStatement;
 import com.datastax.driver.core.BoundStatement;
 import com.datastax.driver.core.exceptions.NoHostAvailableException;
-import com.datastax.driver.core.policies.RoundRobinPolicy;
+import com.datastax.driver.core.policies.DCAwareRoundRobinPolicy;
 import com.datastax.driver.core.querybuilder.Insert;
 import com.datastax.driver.core.querybuilder.QueryBuilder;
 import com.datastax.driver.core.querybuilder.Select;
@@ -30,14 +30,17 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static site.ycsb.workloads.CoreWorkload.TABLENAME_PROPERTY;
+import static site.ycsb.workloads.CoreWorkload.TABLENAME_PROPERTY_DEFAULT;
+
 public class CassandraCQLClient extends DB {
 
     private static Cluster cluster = null;
     private static Session session = null;
 
-    private static final ConcurrentMap<Set<String>, PreparedStatement> readStmts = new ConcurrentHashMap<>();
-    private static final ConcurrentMap<Set<String>, PreparedStatement> insertStmts = new ConcurrentHashMap<>();
-    private static final ConcurrentMap<Set<String>, PreparedStatement> updateStmts = new ConcurrentHashMap<>();
+    private static PreparedStatement readStmt = null;
+    private static PreparedStatement insertStmt = null;
+    private static PreparedStatement updateStmt = null;
 
     // Cassandra interprets QUORUM as ANY QUORUM, as we switched their identifiers
     private static ConsistencyLevel readConsistencyLevel = ConsistencyLevel.LOCAL_QUORUM;
@@ -119,9 +122,10 @@ public class CassandraCQLClient extends DB {
                         getProperties().getProperty(WRITE_CONSISTENCY_LEVEL_PROPERTY,
                                 WRITE_CONSISTENCY_LEVEL_PROPERTY_DEFAULT));
 
-
+                String localDc = host.split("-")[0];
+                System.err.println("LocalDC: " + localDc);
                 cluster = Cluster.builder().withPort(Integer.parseInt(port)).addContactPoints(hosts)
-                        .withLoadBalancingPolicy(new RoundRobinPolicy()).build();
+                        .withLoadBalancingPolicy(DCAwareRoundRobinPolicy.builder().withLocalDc(localDc).build()).build();
 
                 cluster.getConfiguration().getPoolingOptions().setHeartbeatIntervalSeconds(0);
 
@@ -162,6 +166,29 @@ public class CassandraCQLClient extends DB {
 
                 session = cluster.connect(keyspace);
 
+                String table = getProperties().getProperty(TABLENAME_PROPERTY, TABLENAME_PROPERTY_DEFAULT);
+                System.err.println("Preparing statements:");
+
+                Select.Selection selectBuilder = QueryBuilder.select();
+                selectBuilder.column("field0");
+                readStmt = session.prepare(selectBuilder.from(table).where(QueryBuilder.eq(YCSB_KEY, QueryBuilder.bindMarker())).limit(1));
+                readStmt.setConsistencyLevel(readConsistencyLevel);
+                if (trace) readStmt.enableTracing();
+
+                Update updateBuilder = QueryBuilder.update(table);
+                updateBuilder.with(QueryBuilder.set("field0", QueryBuilder.bindMarker()));
+                updateBuilder.where(QueryBuilder.eq(YCSB_KEY, QueryBuilder.bindMarker()));
+                updateStmt = session.prepare(updateBuilder);
+                updateStmt.setConsistencyLevel(writeConsistencyLevel);
+                if (trace) updateStmt.enableTracing();
+
+                Insert insertBuilder = QueryBuilder.insertInto(table);
+                insertBuilder.value(YCSB_KEY, QueryBuilder.bindMarker());
+                insertBuilder.value("field0", QueryBuilder.bindMarker());
+                insertStmt = session.prepare(insertBuilder);
+                insertStmt.setConsistencyLevel(writeConsistencyLevel);
+                if (trace) insertStmt.enableTracing();
+
             } catch (Exception e) {
                 throw new DBException(e);
             }
@@ -177,9 +204,6 @@ public class CassandraCQLClient extends DB {
         synchronized (INIT_COUNT) {
             final int curInitCount = INIT_COUNT.decrementAndGet();
             if (curInitCount <= 0) {
-                readStmts.clear();
-                insertStmts.clear();
-                updateStmts.clear();
                 session.close();
                 cluster.close();
                 cluster = null;
@@ -211,30 +235,7 @@ public class CassandraCQLClient extends DB {
     public Status read(String table, String key, Set<String> fields,
                        Map<String, ByteIterator> result) {
         try {
-            PreparedStatement stmt = readStmts.get(fields);
-
-            // Prepare statement on demand
-            if (stmt == null) {
-                Select.Builder selectBuilder;
-
-                selectBuilder = QueryBuilder.select();
-                for (String col : fields) {
-                    ((Select.Selection) selectBuilder).column(col);
-                }
-
-                stmt = session.prepare(selectBuilder.from(table)
-                        .where(QueryBuilder.eq(YCSB_KEY, QueryBuilder.bindMarker())).limit(1));
-                stmt.setConsistencyLevel(readConsistencyLevel);
-
-                if (trace) stmt.enableTracing();
-
-                PreparedStatement prevStmt = readStmts.putIfAbsent(new HashSet<>(fields), stmt);
-                if (prevStmt != null) {
-                    stmt = prevStmt;
-                }
-            }
-
-            ResultSet rs = session.execute(stmt.bind(key));
+            ResultSet rs = session.execute(readStmt.bind(key));
 
             if (rs.isExhausted()) {
                 return Status.NOT_FOUND;
@@ -282,30 +283,7 @@ public class CassandraCQLClient extends DB {
     public Status update(String table, String key, Map<String, ByteIterator> values) {
 
         try {
-            Set<String> fields = values.keySet();
-            PreparedStatement stmt = updateStmts.get(fields);
-
-            // Prepare statement on demand
-            if (stmt == null) {
-                Update updateStmt = QueryBuilder.update(table);
-
-                // Add fields
-                for (String field : fields) {
-                    updateStmt.with(QueryBuilder.set(field, QueryBuilder.bindMarker()));
-                }
-
-                // Add key
-                updateStmt.where(QueryBuilder.eq(YCSB_KEY, QueryBuilder.bindMarker()));
-
-                stmt = session.prepare(updateStmt);
-                stmt.setConsistencyLevel(writeConsistencyLevel);
-                if (trace) stmt.enableTracing();
-
-                PreparedStatement prevStmt = updateStmts.putIfAbsent(new HashSet<>(fields), stmt);
-                if (prevStmt != null) {
-                    stmt = prevStmt;
-                }
-            }
+            PreparedStatement stmt = updateStmt;
 
             // Add fields
             ColumnDefinitions vars = stmt.getVariables();
@@ -346,31 +324,7 @@ public class CassandraCQLClient extends DB {
     public Status insert(String table, String key, Map<String, ByteIterator> values) {
 
         try {
-            Set<String> fields = values.keySet();
-            PreparedStatement stmt = insertStmts.get(fields);
-
-            // Prepare statement on demand
-            if (stmt == null) {
-                Insert insertStmt = QueryBuilder.insertInto(table);
-
-                // Add key
-                insertStmt.value(YCSB_KEY, QueryBuilder.bindMarker());
-
-                // Add fields
-                for (String field : fields) {
-                    insertStmt.value(field, QueryBuilder.bindMarker());
-                }
-
-                stmt = session.prepare(insertStmt);
-                stmt.setConsistencyLevel(writeConsistencyLevel);
-                if (trace) stmt.enableTracing();
-
-                PreparedStatement prevStmt = insertStmts.putIfAbsent(new HashSet(fields), stmt);
-                if (prevStmt != null) {
-                    stmt = prevStmt;
-                }
-            }
-
+            PreparedStatement stmt = updateStmt;
             // Add key
             BoundStatement boundStmt = stmt.bind().setString(0, key);
 
