@@ -21,11 +21,8 @@ import site.ycsb.DBException;
 import site.ycsb.Status;
 
 import java.nio.ByteBuffer;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Set;
-import java.util.Vector;
+import java.text.SimpleDateFormat;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -81,6 +78,7 @@ public class CassandraCQLClient extends DB {
 
     private static boolean trace = false;
 
+    private final static SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss:SSS");
     /**
      * Initialize any state for this DB. Called once per DB instance; there is one
      * DB instance per client thread.
@@ -123,15 +121,15 @@ public class CassandraCQLClient extends DB {
                                 WRITE_CONSISTENCY_LEVEL_PROPERTY_DEFAULT));
 
                 String localDc = host.split("-")[0];
-                System.err.println("LocalDC: " + localDc);
+                System.err.println(format.format(new Date()) + " LocalDC: " + localDc);
                 cluster = Cluster.builder().withPort(Integer.parseInt(port)).addContactPoints(hosts)
                         .withLoadBalancingPolicy(DCAwareRoundRobinPolicy.builder().withLocalDc(localDc).build()).build();
 
                 cluster.getConfiguration().getPoolingOptions().setHeartbeatIntervalSeconds(0);
 
-                System.err.println("Hosts: " + host);
-                System.err.println("Consistency write: " + writeConsistencyLevel);
-                System.err.println("Consistency read: " + readConsistencyLevel);
+                System.err.println(format.format(new Date()) + " Hosts: " + host);
+                System.err.println(format.format(new Date()) + " Consistency write: " + writeConsistencyLevel);
+                System.err.println(format.format(new Date()) + " Consistency read: " + readConsistencyLevel);
 
                 String maxConnections = getProperties().getProperty(
                         MAX_CONNECTIONS_PROPERTY);
@@ -153,7 +151,6 @@ public class CassandraCQLClient extends DB {
                     cluster.getConfiguration().getSocketOptions()
                             .setConnectTimeoutMillis(Integer.parseInt(connectTimoutMillis));
                 }
-
                 String readTimoutMillis = getProperties().getProperty(
                         READ_TIMEOUT_MILLIS_PROPERTY);
                 if (readTimoutMillis != null) {
@@ -162,12 +159,12 @@ public class CassandraCQLClient extends DB {
                 }
 
                 Metadata metadata = cluster.getMetadata();
-                System.err.println("Connected to cluster: " + metadata.getClusterName());
+                System.err.println(format.format(new Date()) + " Connected to cluster: " + metadata.getClusterName());
 
                 session = cluster.connect(keyspace);
 
                 String table = getProperties().getProperty(TABLENAME_PROPERTY, TABLENAME_PROPERTY_DEFAULT);
-                System.err.println("Preparing statements:");
+                System.err.println(format.format(new Date()) + " Preparing statements:");
 
                 Select.Selection selectBuilder = QueryBuilder.select();
                 selectBuilder.column("field0");
@@ -257,9 +254,9 @@ public class CassandraCQLClient extends DB {
             return Status.OK;
 
         } catch (NoHostAvailableException e) {
-            System.err.println("Error reading partition: " + table + " " + e);
+            System.err.println(format.format(new Date()) + " Error reading partition: " + table + " " + e);
         } catch (Exception e) {
-            System.err.println("Error reading partition: " + table + " " + e);
+            System.err.println(format.format(new Date()) + " Error reading partition: " + table + " " + e);
             System.exit(1);
         }
         return Status.ERROR;
@@ -299,9 +296,9 @@ public class CassandraCQLClient extends DB {
 
             return Status.OK;
         } catch (NoHostAvailableException e) {
-            System.err.println("Error updating partition: " + table + " " + e);
+            System.err.println(format.format(new Date()) + " Error updating partition: " + table + " " + e);
         } catch (Exception e) {
-            System.err.println("Error updating partition: " + table + " " + e);
+            System.err.println(format.format(new Date()) + " Error updating partition: " + table + " " + e);
             System.exit(1);
         }
         return Status.ERROR;
@@ -324,7 +321,7 @@ public class CassandraCQLClient extends DB {
     public Status insert(String table, String key, Map<String, ByteIterator> values) {
 
         try {
-            PreparedStatement stmt = updateStmt;
+            PreparedStatement stmt = insertStmt;
             // Add key
             BoundStatement boundStmt = stmt.bind().setString(0, key);
 
@@ -338,9 +335,9 @@ public class CassandraCQLClient extends DB {
 
             return Status.OK;
         } catch (NoHostAvailableException e) {
-            System.err.println("Error inserting partition: " + table + " " + e);
+            System.err.println(format.format(new Date()) + " Error inserting partition: " + table + " " + e);
         } catch (Exception e) {
-            System.err.println("Error inserting partition: " + table + " " + e);
+            System.err.println(format.format(new Date()) + " Error inserting partition: " + table + " " + e);
             System.exit(1);
         }
         return Status.ERROR;
