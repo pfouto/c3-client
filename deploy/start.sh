@@ -11,9 +11,13 @@ echo "$(date) Running client jar..." > /proc/1/fd/1
 echo "$@" > /proc/1/fd/1
 
 #java -jar client.jar "$@" > /proc/1/fd/1 2>&1
-java -Xmx3g -cp client.jar site.ycsb.Client -t -s -P config.properties "$@" 2> ${log_file}.err 1> ${log_file}.out
+# -Xmx3g
+
+java --add-opens java.base/jdk.internal.misc=ALL-UNNAMED \
+  -Dio.netty.tryReflectionSetAccessible=true \
+  -cp client.jar site.ycsb.Client -t -s -P config.properties "$@" 2> ${log_file}.err 1> ${log_file}.out
+
 #java -cp client.jar site.ycsb.Client -t -s -P config.properties "$@" > /proc/1/fd/1 2>&1
-
-
 #| tee ${log_file}
+
 echo "$(date) Goodbye" > /proc/1/fd/1
